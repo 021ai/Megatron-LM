@@ -681,7 +681,7 @@ class _ParamAndGradBuffer:
             # For MXFP8 param: Create a shared buffer for param AG and grad RS for memory efficiency
             # The buffer is mapped to weight gradients whose dtype is either bf16 or FP32.
             # It can be temporarily reused by param AG.
-            if self.ddp_config.use_distributed_optimizer and any(is_mxfp8tensor(p) for p in params):
+            if self.ddp_config.use_distributed_optimizer and any(is_mxfp8tensor(p) for p in params) and self.ddp_config.reuse_grad_buf_for_mxfp8_param_ag:
                 self.shared_buffer = torch.zeros(
                     self.numel,
                     dtype=self.grad_dtype,
