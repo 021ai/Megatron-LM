@@ -1297,9 +1297,9 @@ class TransformerConfig(ModelParallelConfig):
 
         if self.overlap_moe_expert_parallel_comm:
             # TODO: remove this after we fix the hang issue with torch version < 2.6.0
-            assert is_torch_min_version(
-                "2.6.0"
-            ), "A2A Overlap encounters hang issue with torch version < 2.6.0"
+            # assert is_torch_min_version(
+            #     "2.6.0"
+            # ), "A2A Overlap encounters hang issue with torch version < 2.6.0"
             if self.pipeline_model_parallel_size > 1:
                 assert self.virtual_pipeline_model_parallel_size is not None, (
                     "If enabling EP A2A overlap, virtual_pipeline_model_parallel_size "

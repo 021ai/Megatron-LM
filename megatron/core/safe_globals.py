@@ -7,7 +7,9 @@ from types import SimpleNamespace
 import torch
 from numpy import dtype, ndarray
 from numpy.core.multiarray import _reconstruct
-from numpy.dtypes import UInt32DType
+# from numpy.dtypes import UInt32DType
+import numpy as np
+UInt32DType = np.dtype('uint32')
 
 from megatron.core.enums import ModelType
 from megatron.core.rerun_state_machine import RerunDiagnostic, RerunMode, RerunState
