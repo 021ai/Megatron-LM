@@ -459,7 +459,7 @@ if HAVE_TE:
 
         # Select fp8 recipe (TE version >= 2.1.0).
         fp8_recipe = None
-        if is_te_min_version("2.1.0"):
+        if is_te_min_version("2.0.0"):
             if config.fp8_recipe == Fp8Recipe.delayed:
                 fp8_recipe = TEDelayedScaling(
                     config=config,
