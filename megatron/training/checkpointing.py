@@ -1098,7 +1098,7 @@ def _load_base_checkpoint(
         else:
             checkpoint_name = get_checkpoint_name(load_dir, iteration, release, return_base_dir=False)
         try:
-            state_dict = torch.load(checkpoint_name, map_location='cpu')
+            state_dict = torch.load(checkpoint_name, map_location='musa', weights_only=False)
         except ModuleNotFoundError:
             from megatron.legacy.fp16_deprecated import loss_scaler
 
@@ -1691,11 +1691,13 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
                     rng_state = rng_state[0]
                 random.setstate(rng_state['random_rng_state'])
                 np.random.set_state(rng_state['np_rng_state'])
-                torch.set_rng_state(rng_state['torch_rng_state'])
-                torch.cuda.set_rng_state(rng_state['cuda_rng_state'])
+                torch.set_rng_state(rng_state['torch_rng_state'].cpu())
+                torch.cuda.set_rng_state(rng_state['cuda_rng_state'].cpu())
                 # Check for empty states array
                 if not rng_state['rng_tracker_states']:
                     raise KeyError
+                for k, v in rng_state['rng_tracker_states'].items():
+                    rng_state['rng_tracker_states'][k] = v.cpu()
                 tensor_parallel.get_cuda_rng_tracker().set_states(
                     rng_state['rng_tracker_states'])
             else:  # backward compatability
