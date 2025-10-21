@@ -833,7 +833,8 @@ class TEGroupedMLP(MegatronModule):
             output (torch.Tensor): The output of the local experts.
         """
         tokens_per_expert = tokens_per_expert.tolist()
-        if self.config.fp8:
+        if False and self.config.fp8:
+            # TODO(yehua.zhang): musa groupgemm do not need to unpadding
             actual_tokens_per_expert = tokens_per_expert
             permuted_local_hidden_states, tokens_per_expert = self.fp8_padding(
                 permuted_local_hidden_states, tokens_per_expert
@@ -919,8 +920,9 @@ class TEGroupedMLP(MegatronModule):
             output, output_bias = self.linear_fc2(intermediate_parallel, tokens_per_expert)
 
         # upad and concat the output
-        if self.config.fp8:
-            output = self.fp8_unpadding(output, actual_tokens_per_expert)
+        # TODO(yehua.zhang): musa groupgemm do not need to unpadding
+        # if self.config.fp8:
+        #     output = self.fp8_unpadding(output, actual_tokens_per_expert)
 
         return output, output_bias
 
@@ -1049,7 +1051,8 @@ class SequentialMLP(MegatronModule):
             permuted_probs = torch.ones_like(permuted_probs)
 
         if self.num_local_experts == 1:
-            if self.config.fp8:
+            if False and self.config.fp8:
+                # TODO(yehua.zhang): musa groupgemm do not need to unpadding
                 hidden, probs = self._pad_tensor_for_fp8(
                     permuted_local_hidden_states, permuted_probs
                 )
@@ -1070,7 +1073,8 @@ class SequentialMLP(MegatronModule):
             output_bias_list = []
 
             for expert, tokens, probs in zip(self.local_experts, tokens_list, probs_list):
-                if self.config.fp8:
+                if False and self.config.fp8:
+                    # TODO(yehua.zhang): musa groupgemm do not need to unpadding
                     hidden, probs = self._pad_tensor_for_fp8(tokens, probs)
                     output, output_bias = expert(hidden, probs)
                     output = output[: tokens.shape[0]]
