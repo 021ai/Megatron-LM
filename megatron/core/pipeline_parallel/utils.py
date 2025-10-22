@@ -197,7 +197,8 @@ class ScheduleNode:
             for input in inputs:
                 if input is not None:
                     input.record_stream(self.stream)
-                    input.untyped_storage().resize_(0)
+                    if input.untyped_storage().resizable():
+                        input.untyped_storage().resize_(0)
 
         return self.output
 
