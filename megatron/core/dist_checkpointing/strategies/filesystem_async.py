@@ -218,8 +218,12 @@ class FileSystemWriterAsync(FileSystemWriter):
                 save in a checkpoint.
             non_blocking (bool, optional): knob to enable pinned D2H memcpy. Default is True.
         """
-        result = []
+        if non_blocking:
+            import warnings
+            warnings.warn("non_blocking is not supported in FileSystemWriterAsync.preload_tensors yet")
+            non_blocking = False
 
+        result = []
         for bucket in write_buckets:
             file_name, storage_key, (bytes_data, tensor_data) = bucket
             tensor_data = [
