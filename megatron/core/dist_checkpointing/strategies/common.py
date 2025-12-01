@@ -84,7 +84,7 @@ class TorchCommonLoadStrategy(LoadCommonStrategy):
         try:
             if MultiStorageClientFeature.is_enabled():
                 msc = MultiStorageClientFeature.import_package()
-                return msc.torch.load(load_path, map_location='cpu')
+                return msc.torch.load(load_path, map_location='cpu', weights_only=False)
             else:
                 return torch.load(load_path, map_location='cpu')
         except FileNotFoundError as e:
