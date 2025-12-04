@@ -916,12 +916,15 @@ class TransformerConfig(ModelParallelConfig):
                             "Delayed scaling does not support moe_act and layernorm recompute "
                             "for fp8."
                         )
-                    if not is_te_min_version("2.6.0dev0"):
-                        raise ValueError(
-                            "moe_act and layernorm recompute for fp8 needs "
-                            "transformer-engine>=2.6.0dev0, "
-                            f"but your version is {get_te_version()}."
-                        )
+                    # HACK (Xiaoteng Cui, 2025.12.03) MT TransformerEngine 2.0.0 supports
+                    # "moe_act" and "layernorm" selective recompute with fp8 per block.
+                        
+                    # if not is_te_min_version("2.6.0dev0"):
+                    #     raise ValueError(
+                    #         "moe_act and layernorm recompute for fp8 needs "
+                    #         "transformer-engine>=2.6.0dev0, "
+                    #         f"but your version is {get_te_version()}."
+                    #     )
 
         if self.moe_layer_recompute:
             warnings.warn(
