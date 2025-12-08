@@ -505,6 +505,12 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             num_global_tokens_per_local_expert = num_global_tokens_per_expert[
                 :, :, self.local_expert_indices[0] : self.local_expert_indices[-1] + 1
             ].contiguous()
+
+            # EP balance info collect
+            token_per_expert:torch.Tensor = num_global_tokens_per_expert[0].sum(dim=0)
+            _MaxVio = token_per_expert.max() / token_per_expert.mean() - 1
+            print(f"MaxVio: {_MaxVio}, {token_per_expert.tolist()}")
+
             # [tp_size, ep_size, num_local_experts] -> [tp_size, ep_size]
             num_global_tokens_per_rank = num_global_tokens_per_local_expert.sum(axis=2)
             # [tp_size, ep_size] -> [ep_size]
