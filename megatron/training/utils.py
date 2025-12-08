@@ -264,12 +264,16 @@ def report_memory(name):
     """Simple GPU memory report."""
     mega_bytes = 1024.0 * 1024.0
     string = name + ' memory (MB)'
-    string += ' | allocated: {}'.format(torch.cuda.memory_allocated() / mega_bytes)
-    string += ' | max allocated: {}'.format(torch.cuda.max_memory_allocated() / mega_bytes)
+    string += ' | allocated: {}'.format(int(torch.cuda.memory_allocated() / mega_bytes))
+    string += ' | max allocated: {}'.format(int(torch.cuda.max_memory_allocated() / mega_bytes))
     string += ' | reserved: {}'.format(torch.cuda.memory_reserved() / mega_bytes)
     string += ' | max reserved: {}'.format(torch.cuda.max_memory_reserved() / mega_bytes)
-    if mpu.get_data_parallel_rank() == 0:
-        print("[Rank {}] {}".format(torch.distributed.get_rank(), string), flush=True)
+    from mem_utils import get_max_gpu0_to_7_mem_usage, MemMonitor
+    max_idx, max_usage = get_max_gpu0_to_7_mem_usage()
+    string += ' | max gmi memory usage: {}'.format(max_usage)
+    string += ' | max gmi GPU local ID: {}'.format(max_idx)
+    string += ' | max token num: {}'.format(MemMonitor.max_token_num)
+    print("[Rank {}] {}".format(torch.distributed.get_rank(), string), flush=True)
 
 
 def print_params_min_max_norm(optimizer, iteration):
