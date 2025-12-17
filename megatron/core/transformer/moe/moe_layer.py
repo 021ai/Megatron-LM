@@ -285,6 +285,11 @@ class MoELayer(BaseMoELayer):
         else:
             output, mlp_bias = custom_forward(hidden_states)
 
+        if self.ep_group.rank() == 0:
+            items = [f"layer_num: {self.layer_number:>3}"]
+            items.extend([f"{key}: {val:>6.2f}" for key, val in self.token_dispatcher._extra_info.items()])
+            print(" | ".join(items))
+
         return output, mlp_bias
 
     def backward_dw(self):

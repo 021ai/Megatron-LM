@@ -374,6 +374,13 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         # The conditional below is to make the logic explicit
         # if submodules.mlp is not a ModuleSpec,we dont have to handle passing additional kwargs
         if isinstance(submodules.mlp, ModuleSpec):
+            import inspect
+            paras = {"layer_number": layer_number, "model_comm_pgs": model_comm_pgs}
+            sig = inspect.signature(submodules.mlp.module.__init__)
+            for key, val in paras.items():
+                if key in sig.parameters:
+                    additional_mlp_kwargs[key] = val
+
             if submodules.mlp.module in (MoELayer, GroupedMLP, TEGroupedMLP, SequentialMLP):
                 additional_mlp_kwargs["model_comm_pgs"] = model_comm_pgs
             elif submodules.mlp.module == MLP:
