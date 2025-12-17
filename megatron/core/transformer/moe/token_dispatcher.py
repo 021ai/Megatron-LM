@@ -508,7 +508,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
 
             # EP balance info collect
             token_per_expert:torch.Tensor = num_global_tokens_per_expert.sum(dim=(0, 1))
-            token_per_rank = num_global_tokens_per_local_expert.sum(dim=(0, 1))
+            token_per_rank = num_global_tokens_per_local_expert.sum(dim=(0, 2))
             _max_vio = token_per_expert.max() / token_per_expert.mean() - 1
             _max_rank = token_per_rank.max() / token_per_rank.mean() - 1
             self._extra_info = {"max_vio": _max_vio, "max_rank": _max_rank}
