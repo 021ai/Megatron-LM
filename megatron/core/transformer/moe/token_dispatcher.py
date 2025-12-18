@@ -501,17 +501,18 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
                 .reshape(self.ep_size, self.tp_size, self.num_experts)
                 .transpose(0, 1)
             )
+
+            # EP balance info collect
+            token_per_expert:torch.Tensor = num_global_tokens_per_expert.sum(dim=(0, 1))
+            token_per_rank = token_per_expert.view(self.ep_size, -1).sum(dim=1)
+            _max_vio = token_per_expert.max() / token_per_expert.mean() - 1
+            _max_rank = token_per_rank.max() / token_per_rank.mean() - 1
+            self._extra_info = {"max_vio": _max_vio, "max_rank": _max_rank}
+
             # [tp_size, ep_size, num_experts] -> [tp_size, ep_size, num_local_experts]
             num_global_tokens_per_local_expert = num_global_tokens_per_expert[
                 :, :, self.local_expert_indices[0] : self.local_expert_indices[-1] + 1
             ].contiguous()
-
-            # EP balance info collect
-            token_per_expert:torch.Tensor = num_global_tokens_per_expert.sum(dim=(0, 1))
-            token_per_rank = num_global_tokens_per_local_expert.sum(dim=(0, 2))
-            _max_vio = token_per_expert.max() / token_per_expert.mean() - 1
-            _max_rank = token_per_rank.max() / token_per_rank.mean() - 1
-            self._extra_info = {"max_vio": _max_vio, "max_rank": _max_rank}
             
             # [tp_size, ep_size, num_local_experts] -> [tp_size, ep_size]
             num_global_tokens_per_rank = num_global_tokens_per_local_expert.sum(axis=2)
