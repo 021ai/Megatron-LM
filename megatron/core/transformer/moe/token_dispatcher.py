@@ -508,6 +508,9 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             _max_vio = token_per_expert.max() / token_per_expert.mean() - 1
             _max_rank = token_per_rank.max() / token_per_rank.mean() - 1
             self._extra_info = {"max_vio": _max_vio, "max_rank": _max_rank}
+            from mem_utils import MemMonitor
+            MemMonitor.max_rank_ratio_list.append(_max_rank)
+
 
             # [tp_size, ep_size, num_experts] -> [tp_size, ep_size, num_local_experts]
             num_global_tokens_per_local_expert = num_global_tokens_per_expert[

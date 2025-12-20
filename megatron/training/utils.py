@@ -272,8 +272,10 @@ def report_memory(name):
     max_idx, max_usage = get_max_gpu0_to_7_mem_usage()
     string += ' | max gmi memory usage: {}'.format(max_usage)
     string += ' | max gmi GPU local ID: {}'.format(max_idx)
-    string += ' | max token num: {}'.format(MemMonitor.max_token_num)
+    avg_max_rank_ratio = sum(MemMonitor.max_rank_ratio_list) / len(MemMonitor.max_rank_ratio_list)
+    string += ' | avg_max_rank_ratio: {}'.format(avg_max_rank_ratio)
     print("[Rank {}] {}".format(torch.distributed.get_rank(), string), flush=True)
+    MemMonitor.max_rank_ratio_list = []
 
 
 def print_params_min_max_norm(optimizer, iteration):
