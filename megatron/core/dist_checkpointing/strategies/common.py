@@ -86,7 +86,7 @@ class TorchCommonLoadStrategy(LoadCommonStrategy):
                 msc = MultiStorageClientFeature.import_package()
                 return msc.torch.load(load_path, map_location='cpu', weights_only=False)
             else:
-                return torch.load(load_path, map_location='cpu')
+                return torch.load(load_path, map_location='cpu', weights_only=False)
         except FileNotFoundError as e:
             err_msg = f'Common file {load_path} does not exist'
             if MultiStorageClientFeature.is_enabled():
