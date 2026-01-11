@@ -1002,7 +1002,7 @@ class _DeepepManager(_DispatchManager):
             if self.token_probs.dtype in [torch.bfloat16, torch.float16]:
                 print("DeepEP only supports float32 probs, please set --moe-router-dtype=fp32")
             self.token_probs = self.token_probs.float()  # downcast or upcast
-        hidden_states, dispatched_indices, dispatched_probs, num_tokens_per_expert, handle = (
+        hidden_states, dispatched_indices, dispatched_probs, num_tokens_per_expert, num_tokens_per_rank, handle = (
             fused_dispatch(
                 hidden_states,
                 self.token_indices,
@@ -1017,6 +1017,7 @@ class _DeepepManager(_DispatchManager):
         self.tokens_per_expert = num_tokens_per_expert
         self.dispatched_indices = dispatched_indices
         self.dispatched_probs = dispatched_probs
+        self.num_tokens_per_rank = num_tokens_per_rank
 
         return hidden_states
 
@@ -1291,6 +1292,15 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             self._comm_manager.get_permuted_hidden_states_by_experts(hidden_states)
         )
         tokens_per_expert = self._comm_manager.get_number_of_tokens_per_expert()
+
+        tokens_per_expert_f = tokens_per_expert.float()
+        token_per_rank = self._comm_manager.num_tokens_per_rank
+        _max_vio = tokens_per_expert_f.max() / tokens_per_expert_f.mean() - 1
+        _max_rank = token_per_rank.max() / token_per_rank.mean() - 1
+        self._extra_info = {"max_vio": _max_vio, "max_rank": _max_rank}
+        from mem_utils import MemMonitor
+        MemMonitor.max_rank_ratio_list.append(_max_rank)
+
         return global_input_tokens, tokens_per_expert, permuted_probs
 
     def combine_preprocess(self, hidden_states: torch.Tensor):

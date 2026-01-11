@@ -2242,6 +2242,14 @@ def forward_backward_pipelining_without_interleaving(
                 p2p_communicator.pp_group.size(),
             )
 
+            if input_tensor is not None:
+                if isinstance(input_tensor, list):
+                    for inp in input_tensor:
+                        if inp is not None:
+                            inp.data = torch.Tensor()  # free up memory
+                else:
+                    input_tensor.data = torch.Tensor()  # free up memory
+
             if last_iteration:
                 input_tensor = None
                 p2p_communicator.send_backward(
