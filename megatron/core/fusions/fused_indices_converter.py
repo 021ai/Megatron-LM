@@ -183,7 +183,7 @@ class IndicesToMultihot(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, indices, probs_indices, num_of_local_experts):
+    def forward(ctx, indices, probs_indices, num_of_local_experts, preallocated_probs_b=None):
         '''Forward function for IndicesToMultihot
 
         Convert indices to multihot representation.
@@ -208,6 +208,7 @@ class IndicesToMultihot(torch.autograd.Function):
         probs_in_multihot = torch.empty(
             (num_of_tokens, num_of_local_experts), dtype=probs_indices.dtype, device="cuda"
         )
+
         position_map = torch.empty(
             (num_of_tokens, num_of_local_experts), dtype=torch.int32, device="cuda"
         )
@@ -233,6 +234,7 @@ class IndicesToMultihot(torch.autograd.Function):
         ctx.num_of_tokens = num_of_tokens
         ctx.num_of_local_experts = num_of_local_experts
         ctx.topk = topk
+        ctx.preallocated_probs_b = preallocated_probs_b
         return multihot_indices, probs_in_multihot
 
     @staticmethod
@@ -253,11 +255,18 @@ class IndicesToMultihot(torch.autograd.Function):
         num_of_tokens = ctx.num_of_tokens
         num_of_local_experts = ctx.num_of_local_experts
         topk = ctx.topk
+        preallocated_probs_b = ctx.preallocated_probs_b
 
         # Initialize the gradient of the indices and probs_indices
-        grad_probs_indices = torch.empty(
-            (num_of_tokens, topk), dtype=grad_probs_in_multihot.dtype, device="cuda"
-        )
+        grad_probs_indices = None
+        if preallocated_probs_b is None:
+            grad_probs_indices = torch.empty(
+                (num_of_tokens, topk), dtype=grad_probs_in_multihot.dtype, device="cuda"
+            )
+        else:
+            grad_probs_indices = preallocated_probs_b.view(grad_probs_in_multihot.dtype)
+            grad_probs_indices = grad_probs_indices[:num_of_tokens*topk]
+            grad_probs_indices = grad_probs_indices.view(num_of_tokens, topk)
         # Compute the next power of 2 for the topk and num_of_local_experts
         topk_next_power_of_2 = 2 ** int(math.ceil(math.log2(topk)))
         num_of_local_experts_next_power_of_2 = 2 ** int(math.ceil(math.log2(num_of_local_experts)))
@@ -276,13 +285,13 @@ class IndicesToMultihot(torch.autograd.Function):
             BLOCK_SIZE=32,  # use only 1 warp per block
             num_warps=1,
         )
-        return None, grad_probs_indices, None, None
+        return None, grad_probs_indices, None, None, None
 
 
 @experimental_fn(introduced_with_version='0.11.0rc0')
-def fused_indices_to_multihot(indices, probs_indices, num_of_local_experts):
+def fused_indices_to_multihot(indices, probs_indices, num_of_local_experts, preallocated_probs_b=None):
     """Convert moe topk indices to multihot representation.
 
     This function is an experimental feature and may change in future versions.
     """
-    return IndicesToMultihot.apply(indices, probs_indices, num_of_local_experts)
+    return IndicesToMultihot.apply(indices, probs_indices, num_of_local_experts, preallocated_probs_b)
