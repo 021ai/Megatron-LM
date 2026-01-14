@@ -1,5 +1,6 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
+import os
 import logging
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
@@ -503,13 +504,15 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             )
 
             # EP balance info collect
-            token_per_expert:torch.Tensor = num_global_tokens_per_expert.sum(dim=(0, 1))
-            token_per_rank = token_per_expert.view(self.ep_size, -1).sum(dim=1)
-            _max_vio = token_per_expert.max() / token_per_expert.mean() - 1
-            _max_rank = token_per_rank.max() / token_per_rank.mean() - 1
-            self._extra_info = {"max_vio": _max_vio, "max_rank": _max_rank}
-            from mem_utils import MemMonitor
-            MemMonitor.max_rank_ratio_list.append(_max_rank)
+            if os.environ.get('EP_BALANCE_INFO', '0') == '1':
+                _token_per_expert:torch.Tensor = num_global_tokens_per_expert.sum(dim=(0, 1)).float()
+                _token_per_device:torch.Tensor = _token_per_expert.view(self.ep_size, -1).sum(dim=1)
+                _q = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0])
+                _expert_quantile = (_token_per_expert / _token_per_expert.mean()).quantile(_q.to(_token_per_expert.device))
+                _device_quantile = (_token_per_device / _token_per_device.mean()).quantile(_q.to(_token_per_device.device))
+                self._extra_info = {"expert_quantile": _expert_quantile, "device_quantile": _device_quantile}
+                from mem_utils import MemMonitor
+                MemMonitor.max_rank_ratio_list.append(_device_quantile[-1])
 
 
             # [tp_size, ep_size, num_experts] -> [tp_size, ep_size, num_local_experts]
@@ -1293,13 +1296,16 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         )
         tokens_per_expert = self._comm_manager.get_number_of_tokens_per_expert()
 
-        tokens_per_expert_f = tokens_per_expert.float()
-        token_per_rank = self._comm_manager.num_tokens_per_rank
-        _max_vio = tokens_per_expert_f.max() / tokens_per_expert_f.mean() - 1
-        _max_rank = token_per_rank.max() / token_per_rank.mean() - 1
-        self._extra_info = {"max_vio": _max_vio, "max_rank": _max_rank}
-        from mem_utils import MemMonitor
-        MemMonitor.max_rank_ratio_list.append(_max_rank)
+        # EP balance info collect
+        if os.environ.get('EP_BALANCE_INFO', '0') == '1':
+            _token_per_expert = tokens_per_expert.flatten().float()
+            _token_per_device = self._comm_manager.num_tokens_per_rank.flatten().float()
+            _q = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0])
+            _expert_quantile = (_token_per_expert / _token_per_expert.mean()).quantile(_q.to(_token_per_expert.device))
+            _device_quantile = (_token_per_device / _token_per_device.mean()).quantile(_q.to(_token_per_device.device))
+            self._extra_info = {"expert_quantile": _expert_quantile, "device_quantile": _device_quantile}
+            from mem_utils import MemMonitor
+            MemMonitor.max_rank_ratio_list.append(_device_quantile[-1])
 
         return global_input_tokens, tokens_per_expert, permuted_probs
 
