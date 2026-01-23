@@ -50,20 +50,20 @@ def _get_thd_token_idx(cu_seqlens, pid_m, seq_num, cp_rank, cp_size):
     return token_idx
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_H": 1}),
-        triton.Config({"BLOCK_H": 2}),
-        triton.Config({"BLOCK_H": 4}),
-        triton.Config({"BLOCK_H": 8}),
-        triton.Config({"BLOCK_H": 16}),
-        triton.Config({"BLOCK_H": 32}),
-        triton.Config({"BLOCK_H": 64}),
-        triton.Config({"BLOCK_H": 128}),
-    ],
-    key=["emb_dim", "head_num"],
-    restore_value=["Q"],
-)
+# @triton.autotune(
+#     configs=[
+#         triton.Config({"BLOCK_H": 1}),
+#         triton.Config({"BLOCK_H": 2}),
+#         triton.Config({"BLOCK_H": 4}),
+#         triton.Config({"BLOCK_H": 8}),
+#         triton.Config({"BLOCK_H": 16}),
+#         triton.Config({"BLOCK_H": 32}),
+#         triton.Config({"BLOCK_H": 64}),
+#         triton.Config({"BLOCK_H": 128}),
+#     ],
+#     key=["emb_dim", "head_num"],
+#     restore_value=["Q"],
+# )
 @triton.jit
 def rotary_fwd_q_kernel(
     Q,
@@ -130,20 +130,20 @@ def rotary_fwd_q_kernel(
     tl.store(Q + x_right_off, x_right, mask=mask)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_H": 1}),
-        triton.Config({"BLOCK_H": 2}),
-        triton.Config({"BLOCK_H": 4}),
-        triton.Config({"BLOCK_H": 8}),
-        triton.Config({"BLOCK_H": 16}),
-        triton.Config({"BLOCK_H": 32}),
-        triton.Config({"BLOCK_H": 64}),
-        triton.Config({"BLOCK_H": 128}),
-    ],
-    key=["emb_dim", "head_num"],
-    restore_value=["DO"],
-)
+# @triton.autotune(
+#     configs=[
+#         triton.Config({"BLOCK_H": 1}),
+#         triton.Config({"BLOCK_H": 2}),
+#         triton.Config({"BLOCK_H": 4}),
+#         triton.Config({"BLOCK_H": 8}),
+#         triton.Config({"BLOCK_H": 16}),
+#         triton.Config({"BLOCK_H": 32}),
+#         triton.Config({"BLOCK_H": 64}),
+#         triton.Config({"BLOCK_H": 128}),
+#     ],
+#     key=["emb_dim", "head_num"],
+#     restore_value=["DO"],
+# )
 @triton.jit
 def rotary_bwd_q_kernel(
     DO,
@@ -269,7 +269,12 @@ class ApplyMLARotaryEmbQ(torch.autograd.Function):
             q.stride(1),
             cp_rank,
             cp_size,
+            16,
         )
+
+        # block_h = rotary_fwd_q_kernel.best_config.kwargs.get('BLOCK_H')
+        # print(f"rotary_fwd_q_kernel BLOCK_H = {block_h}")
+
         ctx.save_for_backward(cos, sin)
         ctx.qk_head_dim = qk_head_dim
         ctx.emb_dim = emb_dim
@@ -318,7 +323,12 @@ class ApplyMLARotaryEmbQ(torch.autograd.Function):
             grad.stride(1),
             ctx.cp_rank,
             ctx.cp_size,
+            2,
         )
+
+        # block_h = rotary_bwd_q_kernel.best_config.kwargs.get('BLOCK_H')
+        # print(f"rotary_bwd_q_kernel BLOCK_H = {block_h}")
+        
         if ctx.cu_seqlens_q is None:
             grad = grad.view(max_seqlen, batch_size, nheads, headdim)
         return grad, None, None, None, None, None, None, None, None
@@ -363,19 +373,19 @@ def fused_apply_mla_rope_for_q(
     )
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_H": 1}),
-        triton.Config({"BLOCK_H": 2}),
-        triton.Config({"BLOCK_H": 4}),
-        triton.Config({"BLOCK_H": 8}),
-        triton.Config({"BLOCK_H": 16}),
-        triton.Config({"BLOCK_H": 32}),
-        triton.Config({"BLOCK_H": 64}),
-        triton.Config({"BLOCK_H": 128}),
-    ],
-    key=["emb_dim", "k_dim", "v_dim", "head_num"],
-)
+# @triton.autotune(
+#     configs=[
+#         triton.Config({"BLOCK_H": 1}),
+#         triton.Config({"BLOCK_H": 2}),
+#         triton.Config({"BLOCK_H": 4}),
+#         triton.Config({"BLOCK_H": 8}),
+#         triton.Config({"BLOCK_H": 16}),
+#         triton.Config({"BLOCK_H": 32}),
+#         triton.Config({"BLOCK_H": 64}),
+#         triton.Config({"BLOCK_H": 128}),
+#     ],
+#     key=["emb_dim", "k_dim", "v_dim", "head_num"],
+# )
 @triton.jit
 def rotary_fwd_kv_kernel(
     KV,
@@ -471,19 +481,19 @@ def rotary_fwd_kv_kernel(
     tl.store(K_ptr + x_right_off, x_right, mask=mask)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_H": 1}),
-        triton.Config({"BLOCK_H": 2}),
-        triton.Config({"BLOCK_H": 4}),
-        triton.Config({"BLOCK_H": 8}),
-        triton.Config({"BLOCK_H": 16}),
-        triton.Config({"BLOCK_H": 32}),
-        triton.Config({"BLOCK_H": 64}),
-        triton.Config({"BLOCK_H": 128}),
-    ],
-    key=["emb_dim", "k_dim", "v_dim", "head_num"],
-)
+# @triton.autotune(
+#     configs=[
+#         triton.Config({"BLOCK_H": 1}),
+#         triton.Config({"BLOCK_H": 2}),
+#         triton.Config({"BLOCK_H": 4}),
+#         triton.Config({"BLOCK_H": 8}),
+#         triton.Config({"BLOCK_H": 16}),
+#         triton.Config({"BLOCK_H": 32}),
+#         triton.Config({"BLOCK_H": 64}),
+#         triton.Config({"BLOCK_H": 128}),
+#     ],
+#     key=["emb_dim", "k_dim", "v_dim", "head_num"],
+# )
 @triton.jit
 def rotary_bwd_kv_kernel(
     dK,
@@ -658,7 +668,12 @@ class ApplyMLARotaryEmbKV(torch.autograd.Function):
             o_value.stride(1),
             cp_rank,
             cp_size,
+            64,
         )
+
+        # block_h = rotary_fwd_kv_kernel.best_config.kwargs.get('BLOCK_H')
+        # print(f"rotary_fwd_kv_kernel BLOCK_H = {block_h}")
+
         ctx.save_for_backward(cos, sin)
         ctx.rotary_interleaved = rotary_interleaved
         ctx.emb_dim = emb_dim
@@ -726,7 +741,12 @@ class ApplyMLARotaryEmbKV(torch.autograd.Function):
             d_emb.stride(0),
             ctx.cp_rank,
             ctx.cp_size,
+            16,
         )
+
+        # block_h = rotary_bwd_kv_kernel.best_config.kwargs.get('BLOCK_H')
+        # print(f"rotary_bwd_kv_kernel BLOCK_H = {block_h}")
+
         if ctx.cu_seqlens_kv is None:
             d_kv = d_kv.view(max_seqlen, batch_size, nheads, ctx.k_dim + ctx.v_dim)
             d_emb = d_emb.view(max_seqlen, batch_size, 1, ctx.emb_dim)
