@@ -28,6 +28,8 @@ from megatron.core.utils import (
     nvtx_range_push,
 )
 
+from transformer_engine.pytorch.cpu_offload import get_fine_grained_offload_handler
+
 from .combined_1f1b import (
     combined_1f1b_schedule_for_interleaved_pipelining,
     combined_1f1b_schedule_for_no_pipelining,
@@ -597,6 +599,7 @@ def forward_backward_no_pipelining(
     else:
         with no_sync_func():
             for i in range(num_microbatches - 1):
+                get_fine_grained_offload_handler().start_microbatch_forward(i)
                 output_tensor, num_tokens = forward_step(
                     forward_step_func,
                     data_iterator,
@@ -612,11 +615,13 @@ def forward_backward_no_pipelining(
                 )
                 total_num_tokens += num_tokens
                 if not forward_only:
+                    get_fine_grained_offload_handler().start_microbatch_backward(i)
                     backward_step(
                         input_tensor, output_tensor, output_tensor_grad, model_type, config
                     )
         # Run computation for last microbatch out of context handler (want to
         # synchronize gradients).
+        get_fine_grained_offload_handler().start_microbatch_forward(num_microbatches - 1)
         output_tensor, num_tokens = forward_step(
             forward_step_func,
             data_iterator,
@@ -636,6 +641,7 @@ def forward_backward_no_pipelining(
         total_num_tokens += num_tokens
 
         if not forward_only:
+            get_fine_grained_offload_handler().start_microbatch_backward(num_microbatches - 1)
             backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, config)
 
     if config.finalize_model_grads_func is not None and not forward_only:
@@ -1153,6 +1159,7 @@ def forward_backward_pipelining_with_interleaving(
 
     def forward_step_helper_preprocess(virtual_microbatch_id, model_chunk_id, microbatch_id):
         """Preprocess for forward_step_helper"""
+        get_fine_grained_offload_handler().start_microbatch_backward(virtual_microbatch_id)
         # launch param synchronization for next model chunk
         # Note: Asynchronous communication tends to slow down compute.
         # To reduce idling from mismatched microbatch times, we launch
@@ -1238,6 +1245,7 @@ def forward_backward_pipelining_with_interleaving(
 
     def backward_step_helper_preprocess(virtual_microbatch_id, model_chunk_id):
         """Preprocess for backward_step_helper"""
+        get_fine_grained_offload_handler().start_microbatch_backward(virtual_microbatch_id)
         # launch grad synchronization (default)
         if config.grad_sync_func is None and is_last_microbatch_for_model_chunk(
             virtual_microbatch_id
@@ -2142,6 +2150,7 @@ def forward_backward_pipelining_without_interleaving(
         input_tensor = p2p_communicator.recv_forward(
             recv_tensor_shapes, is_pp_first_stage(p2p_communicator.pp_group)
         )
+        get_fine_grained_offload_handler().start_microbatch_forward(i)
         output_tensor, num_tokens = forward_step(
             forward_step_func,
             data_iterator,
@@ -2184,7 +2193,7 @@ def forward_backward_pipelining_without_interleaving(
             ) >= config.num_microbatches_with_partial_activation_checkpoints
         else:
             checkpoint_activations_microbatch = None
-
+        get_fine_grained_offload_handler().start_microbatch_forward(num_warmup_microbatches + i)
         output_tensor, num_tokens = forward_step(
             forward_step_func,
             data_iterator,
@@ -2213,6 +2222,15 @@ def forward_backward_pipelining_without_interleaving(
                     recv_tensor_shapes, is_pp_first_stage(p2p_communicator.pp_group)
                 )
         else:
+            get_fine_grained_offload_handler().start_microbatch_backward(i)
+            if i==0:
+                reloading_microbatch_id = i
+                reloading_layer_id = get_fine_grained_offload_handler().num_layers - 1
+                if config.offload_moe_fc1_input:
+                    get_fine_grained_offload_handler().launch_reload('moe_fc1_input', reloading_microbatch_id = reloading_microbatch_id, reloading_layer_id = reloading_layer_id)
+                if config.offload_moe_fused_swiglu_input:
+                    get_fine_grained_offload_handler().launch_reload('moe_fused_swiglu_input', reloading_microbatch_id = reloading_microbatch_id, reloading_layer_id = reloading_layer_id)
+                    
             output_tensor_grad = p2p_communicator.send_forward_recv_backward(
                 output_tensor, send_tensor_shapes, is_pp_last_stage(p2p_communicator.pp_group)
             )
@@ -2233,6 +2251,12 @@ def forward_backward_pipelining_without_interleaving(
                 if config.grad_sync_func is None or rank == 0:
                     enable_grad_sync()
 
+            if i==0:
+                if config.offload_moe_fc1_input:
+                    get_fine_grained_offload_handler().wait_reload('moe_fc1_input', reloading_microbatch_id = reloading_microbatch_id, reloading_layer_id = reloading_layer_id)
+                if config.offload_moe_fused_swiglu_input:
+                    get_fine_grained_offload_handler().wait_reload('moe_fused_swiglu_input', reloading_microbatch_id = reloading_microbatch_id, reloading_layer_id = reloading_layer_id)
+                
             input_tensor_grad = backward_step(
                 input_tensor,
                 output_tensor,
@@ -2282,6 +2306,7 @@ def forward_backward_pipelining_without_interleaving(
                 send_tensor_shapes, is_pp_last_stage(p2p_communicator.pp_group)
             )
 
+            get_fine_grained_offload_handler().start_microbatch_backward(num_microbatches_remaining + i)
             input_tensor_grad = backward_step(
                 input_tensor,
                 output_tensor,

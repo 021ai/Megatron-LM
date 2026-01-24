@@ -187,23 +187,47 @@ class SwiGLUFunction(torch.autograd.Function):
         tmp = swiglu_back(grad_output, input)
         return tmp, None, None
 
+from transformer_engine.pytorch.cpu_offload import set_offloading_param, get_fine_grained_offload_handler, has_acivation_offloading_param
 
 class WeightedSwiGLUFunction(torch.autograd.Function):
     @staticmethod
     # bias is an optional argument
-    def forward(ctx, input, weights, fp8_input_store):
+    def forward(ctx, input, weights, fp8_input_store, fine_grained_offload: bool = False):
+        fine_grained_offload_handler = get_fine_grained_offload_handler()
         input_for_backward = input.to(torch.float8_e4m3fn) if fp8_input_store else input
-        ctx.save_for_backward(input_for_backward, weights)
+        if fine_grained_offload and not has_acivation_offloading_param(input_for_backward) and not fine_grained_offload_handler.is_last_2_pipeline_parallel_stage() and not fine_grained_offload_handler.is_last_batch_last_layer():
+            set_offloading_param(input_for_backward, 'fine_grained_offloading', 'moe_fused_swiglu_input')
+            ctx.tensor_tag = fine_grained_offload_handler.register_offload(input_for_backward)
+            ctx.save_for_backward(weights)
+            ctx.input_for_backward = input_for_backward    
+        else:
+            if fine_grained_offload and has_acivation_offloading_param(input_for_backward):
+                # [fine_grained_offload mode] in recomputing fwd phase (2nd fwd phase) 
+                tensor_tag = fine_grained_offload_handler.get_tag_from_name('moe_fused_swiglu_input')                
+                input_for_backward = fine_grained_offload_handler.get_reloaded(tensor_tag)
+                input = input_for_backward.to(input.dtype) if fp8_input_store else input_for_backward
+            
+            ctx.tensor_tag = None
+            ctx.save_for_backward(input_for_backward, weights)
         ctx.ori_input_dtype = input.dtype
         ctx.fp8_input_store = fp8_input_store
+        ctx.fine_grained_offload = fine_grained_offload
         return weighted_swiglu(input, weights)
 
     @staticmethod
     def backward(ctx, grad_output):
-        input, weights = ctx.saved_tensors
+        fine_grained_offload_handler = get_fine_grained_offload_handler()
+        if ctx.tensor_tag != None:
+            (weights, ) = ctx.saved_tensors
+            input = ctx.input_for_backward
+            assert not fine_grained_offload_handler.is_last_2_pipeline_parallel_stage() and not fine_grained_offload_handler.is_last_batch_last_layer()
+            input = fine_grained_offload_handler.get_reloaded(ctx.tensor_tag)
+        else:
+            input, weights = ctx.saved_tensors
+        
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
         tmp, wgrad = weighted_swiglu_back(grad_output, input, weights)
-        return tmp, wgrad, None
+        return tmp, wgrad, None, None
 
 
 def bias_swiglu_impl(input, bias, fp8_input_store=False, cpu_offload_input=False):
@@ -236,17 +260,21 @@ def bias_swiglu_impl(input, bias, fp8_input_store=False, cpu_offload_input=False
     return output if len(ori_shape) == 2 else output.view(ori_shape[0], ori_shape[1], -1)
 
 
-def weighted_bias_swiglu_impl(input, bias, weights, fp8_input_store=False):
+def weighted_bias_swiglu_impl(input, bias, weights, fp8_input_store=False, fine_grained_offload : bool = False):
     """
     Token-wise-weighted bias swiglu fusion.
     """
     ori_shape = input.shape
     assert len(ori_shape) in [2, 3]
-    input = input.view(-1, ori_shape[-1])
+    input_view = input.view(-1, ori_shape[-1])
+    from megatron.core.utils import make_viewless_tensor
+    input_view = make_viewless_tensor(inp=input_view, requires_grad=input_view.requires_grad, keep_graph=True)
+    if hasattr(input, "fine_grained_offloading"):
+        setattr(input_view, "fine_grained_offloading", input.fine_grained_offloading)
     if bias is not None:
         raise NotImplementedError("Bias is not supported for weighted swiglu fusion")
     else:
-        output = WeightedSwiGLUFunction.apply(input, weights, fp8_input_store)
+        output = WeightedSwiGLUFunction.apply(input_view, weights, fp8_input_store, fine_grained_offload)
 
     return output if len(ori_shape) == 2 else output.view(ori_shape[0], ori_shape[1], -1)
 

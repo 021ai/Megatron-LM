@@ -613,3 +613,101 @@ class CheckpointWithoutOutput(object):
         # computations.
         if hook_tensor.requires_grad:
             hook_tensor.register_hook(self._recompute)
+
+from transformer_engine.pytorch.cpu_offload import set_offloading_param, has_acivation_offloading_param
+
+class OffloadFirstInputAndCheckpointWithoutOutputFunction(torch.autograd.Function):
+    """
+    Checkpoint Function Helper for CheckpointWithouOutput.
+    Save context for recompute.
+    """
+
+    @staticmethod
+    def forward(ctx, run_function, checkpoint_without_output_obj, input_to_offload, *remaining_inputs):
+        """Forward pass."""
+        if checkpoint_without_output_obj.fp8:
+            fp8 = FP8GlobalStateManager.is_fp8_enabled()
+            ctx.fp8 = fp8
+            ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+            fwd_ctx = activation_recompute_forward(activation_recompute=True, recompute_phase=False)
+        else:
+            ctx.fp8 = False
+            ctx.fp8_recipe = None
+            fwd_ctx = contextlib.nullcontext()
+        with torch.no_grad(), fwd_ctx:
+            outputs = run_function(input_to_offload, *remaining_inputs)
+        ctx.save_for_backward(*detach_variable(remaining_inputs))
+        input_to_offload_requires_grad = input_to_offload.requires_grad
+        input_to_offload = input_to_offload.detach()
+        input_to_offload.requires_grad_(input_to_offload_requires_grad)
+        ctx.input_to_offload = input_to_offload
+        # the OffloadFirstInputAndCheckpointWithoutOutputFunction object is passed in, then it can access the saved input
+        # tensors later for recomputation
+        checkpoint_without_output_obj.ctx = ctx
+        return outputs
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        """Backward pass."""
+        remaining_inputs = ctx.saved_tensors
+        outputs = ctx.outputs
+        torch.autograd.backward(outputs, grad_outputs)
+        ctx.outputs = None
+        input_to_offload_grad = ctx.input_to_offload.grad if isinstance(ctx.input_to_offload, torch.Tensor) else ctx.input_to_offload
+        grads = input_to_offload_grad, *tuple(inp.grad if isinstance(inp, torch.Tensor) else inp for inp in remaining_inputs)
+        return (None, None) + grads
+    
+
+class OffloadFirstInputAndCheckpointWithoutOutput(CheckpointWithoutOutput):
+    
+    def checkpoint(self, run_function, *args):
+        """Checkpoint function."""
+        self.run_function = run_function
+
+        self.rng_states = _get_all_rng_states()
+
+        outputs = OffloadFirstInputAndCheckpointWithoutOutputFunction.apply(run_function, self, *args)
+        self.outputs = outputs
+        if isinstance(self.outputs, torch.Tensor):
+            self.outputs = (self.outputs,)
+        return outputs
+    
+    def _recompute(self, _):
+        """Used as a hook to recompute the output."""
+        if not torch.autograd._is_checkpoint_valid():
+            raise RuntimeError(
+                "Checkpointing is not compatible with .grad(), "
+                "please use .backward() if possible"
+            )
+        with _fork_rng():
+            _set_all_rng_states(*self.rng_states)
+
+            if self.fp8:
+                recompute_ctx = activation_recompute_forward(
+                    activation_recompute=True, recompute_phase=True
+                )
+                fp8_ctx = fp8_autocast(enabled=self.ctx.fp8, fp8_recipe=self.ctx.fp8_recipe)
+            else:
+                recompute_ctx = contextlib.nullcontext()
+                fp8_ctx = contextlib.nullcontext()
+            set_offloading_param(self.ctx.input_to_offload, 'fine_grained_offloading', 'offload')
+
+            with torch.enable_grad(), fp8_ctx, recompute_ctx:
+                outputs = self.run_function(self.ctx.input_to_offload, *self.ctx.saved_tensors)
+
+        self.run_function = None
+        self.rng_states = None
+
+        if isinstance(outputs, torch.Tensor):
+            outputs = (outputs,)
+
+        # restore the recomputed memory without changing the metadata
+        with torch.no_grad():
+            for output, recomputation_output in zip(self.outputs, outputs):
+                output_size = recomputation_output.untyped_storage().size()
+                output.untyped_storage().resize_(output_size)
+                output.untyped_storage().copy_(recomputation_output.untyped_storage())
+
+        self.ctx.outputs = outputs
+        self.outputs = None
+        self.ctx = None

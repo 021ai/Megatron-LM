@@ -856,7 +856,8 @@ class TEGroupedMLP(MegatronModule):
             permuted_probs = torch.ones_like(permuted_probs)
 
         intermediate_parallel, bias_parallel = self.linear_fc1(
-            permuted_local_hidden_states, tokens_per_expert
+            permuted_local_hidden_states, tokens_per_expert,
+            fine_grained_offload=self.config.offload_moe_fc1_input,
         )
 
         def bias_act_func(intermediate_parallel, bias_parallel, permuted_probs):
@@ -868,6 +869,7 @@ class TEGroupedMLP(MegatronModule):
                         bias_parallel,
                         permuted_probs,
                         self.config.activation_func_fp8_input_store,
+                        self.config.offload_moe_fused_swiglu_input
                     )
                 else:
                     raise ValueError("Only support fusion of swiglu in TEGroupedMLP.")
@@ -907,7 +909,12 @@ class TEGroupedMLP(MegatronModule):
             return intermediate_parallel
 
         if self.activation_recompute:
-            self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
+            from transformer_engine.pytorch.cpu_offload import get_fine_grained_offload_handler
+            fine_grained_offload_handler = get_fine_grained_offload_handler()
+            if self.config.offload_moe_fused_swiglu_input and not fine_grained_offload_handler.is_last_2_pipeline_parallel_stage() and not fine_grained_offload_handler.is_last_batch_last_layer():
+                self.activation_checkpoint = tensor_parallel.OffloadFirstInputAndCheckpointWithoutOutput()
+            else:
+                self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
             intermediate_parallel = self.activation_checkpoint.checkpoint(
                 bias_act_func, intermediate_parallel, bias_parallel, permuted_probs
             )
