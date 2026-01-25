@@ -51,6 +51,10 @@ if HAVE_TE:
         te_checkpoint,
     )
 
+    from transformer_engine.pytorch.cpu_offload import (
+        get_fine_grained_offload_handler,
+        FineGrainedOffloadLayerCounter,
+    )
     LayerNormImpl = TENorm
 
 elif HAVE_APEX:
@@ -399,6 +403,12 @@ class TransformerBlock(MegatronModule):
                             inference_context=None,
                             packed_seq_params=packed_seq_params,
                         )
+                        if self.config.offload_moe_fc1_input or self.config.offload_moe_fused_swiglu_input:
+                            hidden_states = FineGrainedOffloadLayerCounter.apply(hidden_states)
+                            hidden_states = make_viewless_tensor(
+                                inp=hidden_states, requires_grad=True, keep_graph=True
+                            )
+
                 return hidden_states, context
 
             return custom_forward
@@ -561,6 +571,10 @@ class TransformerBlock(MegatronModule):
         use_inner_fp8_context = self.config.fp8 and self.config.fp8_recipe != Fp8Recipe.delayed
         outer_fp8_context = get_fp8_context(self.config) if use_outer_fp8_context else nullcontext()
 
+        get_fine_grained_offload_handler().num_layers = len(self.layers)
+        get_fine_grained_offload_handler().pp_size = self.config.pipeline_model_parallel_size
+        get_fine_grained_offload_handler().is_pipeline_last_stage = parallel_state.is_pipeline_last_stage()
+
         with rng_context, outer_fp8_context:
             # Forward pass.
             if self.config.recompute_granularity == 'full' and self.training:
@@ -602,6 +616,13 @@ class TransformerBlock(MegatronModule):
                         and self.group_prefetch_offload_commit_async is not None
                     ):
                         hidden_states = self.group_prefetch_offload_commit_async(hidden_states)
+
+                    if self.config.offload_moe_fc1_input or self.config.offload_moe_fused_swiglu_input:
+
+                        hidden_states = FineGrainedOffloadLayerCounter.apply(hidden_states)
+                        hidden_states = make_viewless_tensor(
+                            inp=hidden_states, requires_grad=True, keep_graph=True
+                        )
 
         # Final layer norm.
         if self.final_layernorm is not None:
