@@ -440,6 +440,17 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         # use_nvfuser = TORCH_MAJOR > 1 or (TORCH_MAJOR == 1 and TORCH_MINOR >= 10)
         # self.bias_dropout_add_exec_handler = nullcontext if use_nvfuser else torch.enable_grad
         self.bias_dropout_add_exec_handler = torch.enable_grad
+        
+        
+        if config.offload_moe_fc1_input or config.offload_moe_fused_swiglu_input:
+            from transformer_engine.pytorch.cpu_offload import get_fine_grained_offload_handler
+            if isinstance(self.mlp, MoELayer):
+                get_fine_grained_offload_handler().moe_layer_pattern.append(1)
+            elif isinstance(self.mlp, MLP):
+                get_fine_grained_offload_handler().moe_layer_pattern.append(0)
+            else:
+                raise ValueError("selective activation offload only support TransformerLayer with isinstance(self.mlp, MoELayer) or isinstance(self.mlp, MLP).")
+                
 
     @staticmethod
     def _get_layer_offset(config: TransformerConfig):

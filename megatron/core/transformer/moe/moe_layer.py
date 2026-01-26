@@ -1,6 +1,5 @@
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
 
-import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -25,6 +24,8 @@ try:
     import transformer_engine as te  # pylint: disable=unused-import
 
     from megatron.core.extensions.transformer_engine import te_checkpoint
+    from transformer_engine.pytorch.cpu_offload import get_fine_grained_offload_handler
+    from transformer_engine.pytorch.cpu_offload import LaunchReloadFunction, WaitReloadFunction
 
     HAVE_TE = True
 except ImportError:
@@ -201,6 +202,13 @@ class MoELayer(BaseMoELayer):
         it is also applied. The output from the experts is preprocessed for the
         combine step.
         """
+        if self.config.offload_moe_fc1_input:
+            get_fine_grained_offload_handler().launch_offload('moe_fc1_input')
+            hidden_states = WaitReloadFunction.apply(hidden_states, 'moe_fc1_input')
+        if self.config.offload_moe_fused_swiglu_input:
+            get_fine_grained_offload_handler().launch_offload('moe_fused_swiglu_input')
+            hidden_states = WaitReloadFunction.apply(hidden_states, 'moe_fused_swiglu_input')
+        
         shared_expert_output = None
         if self.use_shared_expert and not self.shared_expert_overlap:
             # Compute the shared expert separately when not overlapped with communication.
@@ -225,6 +233,13 @@ class MoELayer(BaseMoELayer):
         expert_output, mlp_bias = self.experts(dispatched_input, tokens_per_expert, permuted_probs)
         assert mlp_bias is None, f"mlp_bias is not supported for {type(self.token_dispatcher)}"
         output = self.token_dispatcher.combine_preprocess(expert_output)
+        
+        if self.config.offload_moe_fc1_input:
+            get_fine_grained_offload_handler().wait_offload('moe_fc1_input')
+            output = LaunchReloadFunction.apply(output, 'moe_fc1_input')
+        if self.config.offload_moe_fused_swiglu_input:
+            get_fine_grained_offload_handler().wait_offload('moe_fused_swiglu_input')
+            output = LaunchReloadFunction.apply(output, 'moe_fused_swiglu_input')
 
         return output, shared_expert_output, mlp_bias
 
@@ -285,7 +300,8 @@ class MoELayer(BaseMoELayer):
                 output, mlp_bias = tensor_parallel.checkpoint(custom_forward, False, hidden_states)
         else:
             output, mlp_bias = custom_forward(hidden_states)
-
+        
+        import os
         if self.ep_group.rank() == 0 and \
             os.environ.get('EP_BALANCE_INFO', '0') == '1' and hasattr(self.token_dispatcher, "_extra_info"):
             items = [f"layer_num: {self.layer_number:>3}"]
