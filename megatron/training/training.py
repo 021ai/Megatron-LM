@@ -1658,6 +1658,9 @@ def save_checkpoint_and_time(
     # Extra barrier is added to make sure all ranks report the max time.
     timer_key = 'save-checkpoint-non-persistent' if non_persistent_ckpt else 'save-checkpoint'
     timers(timer_key, log_level=0).start(barrier=True)
+    
+    from transformer_engine.pytorch.cpu_offload import get_fine_grained_offload_handler
+    get_fine_grained_offload_handler().release_cpu_pinmem_pool()
 
     # Log E2E metrics before save-checkpoint
     one_logger_utils.track_e2e_metrics()
@@ -1694,6 +1697,8 @@ def save_checkpoint_and_time(
             iteration, num_floating_point_operations_so_far
         )
 
+    get_fine_grained_offload_handler().resume_cpu_pinmem_pool()
+    
     # Recover timing
     energy_monitor.resume()
     timers('interval-time', log_level=0).start(barrier=True)
