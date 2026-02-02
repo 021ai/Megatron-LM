@@ -573,7 +573,6 @@ class TransformerBlock(MegatronModule):
 
         get_fine_grained_offload_handler().num_layers = len(self.layers)
         get_fine_grained_offload_handler().pp_size = self.config.pipeline_model_parallel_size
-        get_fine_grained_offload_handler().is_pipeline_last_stage = parallel_state.is_pipeline_last_stage()
 
         with rng_context, outer_fp8_context:
             # Forward pass.

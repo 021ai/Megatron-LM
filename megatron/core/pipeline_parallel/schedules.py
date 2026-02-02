@@ -2226,10 +2226,12 @@ def forward_backward_pipelining_without_interleaving(
             if i==0:
                 reloading_microbatch_id = i
                 reloading_layer_id = get_fine_grained_offload_handler().num_layers - 1
+                get_fine_grained_offload_handler().current_layer_id -= 1
                 if config.offload_moe_fc1_input:
                     get_fine_grained_offload_handler().launch_reload('moe_fc1_input', reloading_microbatch_id = reloading_microbatch_id, reloading_layer_id = reloading_layer_id)
                 if config.offload_moe_fused_swiglu_input:
                     get_fine_grained_offload_handler().launch_reload('moe_fused_swiglu_input', reloading_microbatch_id = reloading_microbatch_id, reloading_layer_id = reloading_layer_id)
+                get_fine_grained_offload_handler().current_layer_id += 1
                     
             output_tensor_grad = p2p_communicator.send_forward_recv_backward(
                 output_tensor, send_tensor_shapes, is_pp_last_stage(p2p_communicator.pp_group)
@@ -2252,10 +2254,12 @@ def forward_backward_pipelining_without_interleaving(
                     enable_grad_sync()
 
             if i==0:
+                get_fine_grained_offload_handler().current_layer_id -= 1
                 if config.offload_moe_fc1_input:
                     get_fine_grained_offload_handler().wait_reload('moe_fc1_input', reloading_microbatch_id = reloading_microbatch_id, reloading_layer_id = reloading_layer_id)
                 if config.offload_moe_fused_swiglu_input:
                     get_fine_grained_offload_handler().wait_reload('moe_fused_swiglu_input', reloading_microbatch_id = reloading_microbatch_id, reloading_layer_id = reloading_layer_id)
+                get_fine_grained_offload_handler().current_layer_id += 1
                 
             input_tensor_grad = backward_step(
                 input_tensor,
