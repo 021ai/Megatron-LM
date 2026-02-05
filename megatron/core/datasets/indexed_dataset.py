@@ -56,6 +56,7 @@ class DType(Enum):
     float64 = 6
     float32 = 7
     uint16 = 8
+    uint32 = 9 # zj align
 
     @classmethod
     def code_from_dtype(cls, value: Type[numpy.number]) -> int:
@@ -947,4 +948,7 @@ def get_bin_path(path_prefix: str) -> str:
     Returns:
         str: The path to the data file
     """
+    if os.path.exists(path_prefix + ".npy"): # zj align
+        return path_prefix + ".npy"
+    
     return path_prefix + ".bin"

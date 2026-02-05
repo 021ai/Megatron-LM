@@ -1696,8 +1696,6 @@ def save_checkpoint_and_time(
         compute_throughputs_and_append_to_progress_log(
             iteration, num_floating_point_operations_so_far
         )
-
-    get_fine_grained_offload_handler().resume_cpu_pinmem_pool()
     
     # Recover timing
     energy_monitor.resume()
