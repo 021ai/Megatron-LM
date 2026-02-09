@@ -301,14 +301,10 @@ class MoELayer(BaseMoELayer):
         else:
             output, mlp_bias = custom_forward(hidden_states)
         
-        import os
-        if self.ep_group.rank() == 0 and \
-            os.environ.get('EP_BALANCE_INFO', '0') == '1' and hasattr(self.token_dispatcher, "_extra_info"):
-            items = [f"layer_num: {self.layer_number:>3}"]
-            for key, val in self.token_dispatcher._extra_info.items():
-                val_str = ",".join([f"{v:>7.3f}" for v in val.flatten().tolist()])
-                items.append(f"{key}:{val_str}")
-            print(" | ".join(items))
+        # if self.ep_group.rank() == 0:
+        #     items = [f"layer_num: {self.layer_number:>3}"]
+        #     items.extend([f"{key}: {val:>6.2f}" for key, val in self.token_dispatcher._extra_info.items()])
+        #     print(" | ".join(items))
 
         return output, mlp_bias
 
