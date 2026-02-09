@@ -1947,7 +1947,7 @@ except ImportError:
     te_general_gemm = None  # type: ignore[assignment, misc]
 
 
-if HAVE_TE and is_te_min_version("2.7.0.dev"):
+if HAVE_TE:
     from transformer_engine.pytorch.router import (  # pylint: disable=unused-import
         fused_compute_score_for_moe_aux_loss,
         fused_moe_aux_loss,
