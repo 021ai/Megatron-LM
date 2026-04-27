@@ -283,7 +283,7 @@ class MultiLatentAttention(Attention):
         else:
             if inference_context is None or inference_context.is_static_batching():
                 extra_kwargs = {}
-                if self.config.experimental_attention_variant == "dsa":
+                if self.config.experimental_attention_variant == "dsa" or self.config.dsa_dense_warmup_stage:
                     # For dsa we need to pass in the original hidden states and the compressed
                     # query representation.
                     extra_kwargs["x"] = hidden_states
@@ -300,6 +300,22 @@ class MultiLatentAttention(Attention):
                         attn_mask_type=attn_mask_type,
                         **extra_kwargs,
                     )
+                
+                # # ===================== DEBUG PRINT =====================
+                # import torch.distributed as dist
+                # rank = dist.get_rank() if dist.is_initialized() else 0
+                # if rank == 0 and self.layer_number <= 2:
+                #     mode_name = "DSA sparse"
+                #     print(f"\n[{mode_name} Debug] Layer {self.layer_number} (core_attention)")
+                #     print(f"  query: shape={query.shape}, mean={query.mean().item():.6f}, std={query.std().item():.6f}")
+                #     print(f"  key:   shape={key.shape}, mean={key.mean().item():.6f}, std={key.std().item():.6f}")
+                #     print(f"  value: shape={value.shape}, mean={value.mean().item():.6f}, std={value.std().item():.6f}")
+                #     print(f"  core_attn_out: shape={core_attn_out.shape}, mean={core_attn_out.mean().item():.6f}, std={core_attn_out.std().item():.6f}")
+                #     print(f"  core_attn_out[0, :5, :5]: {core_attn_out[0, :5, :5].flatten()[:5]}\n")
+                #     print(core_attn_out)
+                # # =======================================================
+
+
             elif self.cache_mla_latents:
                 # Dynamic batching attention kernel.
                 q, k, v = (query, key, value)
@@ -837,7 +853,8 @@ class MLASelfAttention(MultiLatentAttention):
 
         if self.recompute_up_proj:
             quantization = self.config.fp8 or self.config.fp4
-            self.qkv_up_checkpoint = tensor_parallel.CheckpointWithoutOutput(fp8=quantization)
+            # self.qkv_up_checkpoint = tensor_parallel.CheckpointWithoutOutput(fp8=quantization)
+            self.qkv_up_checkpoint = tensor_parallel.CheckpointWithoutOutput()
             query, key, value = self.qkv_up_checkpoint.checkpoint(
                 qkv_up_proj_and_rope_apply, q_compressed, kv_compressed, k_pos_emb, rotary_pos_emb
             )

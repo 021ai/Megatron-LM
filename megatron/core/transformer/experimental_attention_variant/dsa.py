@@ -651,7 +651,7 @@ def unfused_dsa_fn(query, key, value, topk_indices, softmax_scale):
     # [skv, b, np, hn] -> [b, np, hn, skv] -> [b * np, hn, skv]
     key = key.permute(1, 2, 3, 0).reshape(b * np, hn, skv)
     # Compute attention scores [b * np, sq, skv]
-    attention_scores = torch.bmm(query.float(), key.float()) * softmax_scale
+    attention_scores = torch.bmm(query, key) * softmax_scale
     # Reshape to [b, np, sq, skv]
     attention_scores = attention_scores.reshape(b, np, sq, skv)
 

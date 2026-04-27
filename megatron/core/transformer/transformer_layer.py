@@ -455,6 +455,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             and "mlp_norm" in self.config.offload_modules
             and not isinstance(self.pre_mlp_layernorm, IdentityOp)
         )
+        self.recompute_attn = "attn" in self.config.recompute_modules
 
         # @jcasper how should we handle nvfuser?
         # Set bias+dropout+add fusion grad_enable execution handler.
@@ -510,13 +511,116 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         # this is only used to uniquely identify decode and non-decode cuda graph
         # runners in the cuda graph manager
         kwargs.pop("dynamic_inference_decode_only", None)
-        hidden_states, context = self._forward_attention(*args, **kwargs)
+        if self.recompute_attn:
+            hidden_states, context = self._forward_attention_wrapper(*args, **kwargs)
+        else:
+            hidden_states, context = self._forward_attention(*args, **kwargs)
         output = self._forward_mlp(
             hidden_states,
             kwargs.get("inference_context", None),
             padding_mask=kwargs.get("padding_mask", None),
         )
         return output, context
+
+    def _forward_attention_wrapper(self, *args, **kwargs):
+        # 根据_forward_attention的参数顺序，从args中提取所有可能的位置参数
+        # 参数顺序: hidden_states, attention_mask, context, context_mask, rotary_pos_emb,
+        # rotary_pos_cos, rotary_pos_sin, attention_bias, inference_context,
+        # packed_seq_params, sequence_len_offset
+
+        inference_params = kwargs.get('inference_params')
+        if inference_params is not None:
+            return self._forward_attention(*args, **kwargs)
+
+        # 初始化所有参数为None
+        hidden_states = None
+        attention_mask = None
+        context = None
+        context_mask = None
+        rotary_pos_emb = None
+        rotary_pos_cos = None
+        rotary_pos_sin = None
+        rotary_pos_cos_sin = None
+        attention_bias = None
+        inference_context = None
+        packed_seq_params = None
+        sequence_len_offset = None
+        padding_mask = None
+
+        if len(args) > 0:
+            hidden_states = args[0]
+        if len(args) > 1:
+            attention_mask = args[1]
+        if len(args) > 2:
+            context = args[2]
+        if len(args) > 3:
+            context_mask = args[3]
+        if len(args) > 4:
+            rotary_pos_emb = args[4]
+        if len(args) > 5:
+            rotary_pos_cos = args[5]
+        if len(args) > 6:
+            rotary_pos_sin = args[6]
+        if len(args) > 7:
+            rotary_pos_cos_sin = args[7]
+        if len(args) > 8:
+            attention_bias = args[8]
+        if len(args) > 9:
+            inference_context = args[9]
+        if len(args) > 10:
+            packed_seq_params = args[10]
+        if len(args) > 11:
+            sequence_len_offset = args[11]
+        if len(args) > 12:
+            padding_mask = args[12]
+
+        # kwargs中的值会覆盖args中提取的值（如果存在的话）
+        hidden_states = kwargs.get('hidden_states', hidden_states)
+        attention_mask = kwargs.get('attention_mask', attention_mask)
+        context = kwargs.get('context', context)
+        context_mask = kwargs.get('context_mask', context_mask)
+        rotary_pos_emb = kwargs.get('rotary_pos_emb', rotary_pos_emb)
+        rotary_pos_cos = kwargs.get('rotary_pos_cos', rotary_pos_cos)
+        rotary_pos_sin = kwargs.get('rotary_pos_sin', rotary_pos_sin)
+        rotary_pos_cos_sin = kwargs.get('rotary_pos_cos_sin', rotary_pos_cos_sin)
+        attention_bias = kwargs.get('attention_bias', attention_bias)
+        inference_context = kwargs.get('inference_context', inference_context)
+        packed_seq_params = kwargs.get('packed_seq_params', packed_seq_params)
+        sequence_len_offset = kwargs.get('sequence_len_offset', sequence_len_offset)
+        padding_mask = kwargs.get('padding_mask', padding_mask)
+
+        # to ensure the checkpoint node won't be trimed when freeze embedding module
+        hidden_states.requires_grad_(True)
+        return tensor_parallel.checkpoint(
+            self._forward_attention_wrapper_core, False,
+            hidden_states, attention_mask, context, context_mask,
+            rotary_pos_emb, rotary_pos_cos, rotary_pos_sin, rotary_pos_cos_sin,
+            attention_bias, inference_context, packed_seq_params,
+            sequence_len_offset, padding_mask
+        )
+
+    def _forward_attention_wrapper_core(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Optional[Tensor] = None,
+        context: Optional[Tensor] = None,
+        context_mask: Optional[Tensor] = None,
+        rotary_pos_emb: Optional[Tensor] = None,
+        rotary_pos_cos: Optional[Tensor] = None,
+        rotary_pos_sin: Optional[Tensor] = None,
+        rotary_pos_cos_sin: Optional[Tensor] = None,
+        attention_bias: Optional[Tensor] = None,
+        inference_context: Optional[Any] = None,
+        packed_seq_params: Optional[PackedSeqParams] = None,
+        sequence_len_offset: Optional[Tensor] = None,
+        padding_mask: Optional[Tensor] = None
+    ):
+        return self._forward_attention(
+            hidden_states, attention_mask, context, context_mask,
+            rotary_pos_emb, rotary_pos_cos, rotary_pos_sin, rotary_pos_cos_sin,
+            attention_bias, inference_context, packed_seq_params,
+            sequence_len_offset, padding_mask
+        )
 
     def _forward_attention(
         self,

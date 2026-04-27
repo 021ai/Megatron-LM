@@ -730,6 +730,9 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             use_inner_quantization_context = False
             outer_quantization_context = nullcontext()
 
+        # to ensure the checkpoint node won't be trimed when freeze embedding module
+        if self.config.experimental_attention_variant == "dsa" or self.config.dsa_dense_warmup_stage:
+            hidden_states.requires_grad_(True)
         with rng_context, outer_quantization_context:
             # Forward pass.
             if self.config.recompute_granularity == 'full' and self.training:
@@ -831,6 +834,8 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             if self.config.moe_layer_freq > 1:
                 non_homogeneous_layers = True
         elif isinstance(self.config.moe_layer_freq, list):
+            non_homogeneous_layers = True
+        if self.config.moe_layer_pattern is not None and len(set(self.config.moe_layer_pattern)) != 1:
             non_homogeneous_layers = True
 
         if isinstance(self.config.linear_attention_freq, int):

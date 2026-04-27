@@ -41,7 +41,10 @@ class TransformerConfig(ModelParallelConfig):
     ####################
     # model architecture
     ####################
-
+    moe_layer_pattern : Optional[List[int]] = None
+    """Moe layer pattern for dense or expert layer, where 0 means dense layer ,
+    1 means expert layer"""
+    
     num_layers: int = field(default=0, metadata={"argparse_meta": {"default": None}})
     """Number of transformer layers in a transformer block."""
 
@@ -268,6 +271,11 @@ class TransformerConfig(ModelParallelConfig):
     dsa_indexer_use_sparse_loss: bool = False
     """Whether to use sparse DSA indexer loss. If True, the indexer loss will be computed using the
     top-k indices."""
+
+    dsa_dense_warmup_stage: bool = False
+    """We first use a short warm-up stage to initialize the lightning indexer.
+    In this stage, we keep dense attention and freeze all model parameters except for the lightning
+    indexer. dsa_dense_warmup_stage=false means Sparse Training Stage"""
 
     ####################
     # linear attention
@@ -531,6 +539,10 @@ class TransformerConfig(ModelParallelConfig):
     ####################
     # MoE related
     ####################
+    show_moe_experts_tokens: bool = False
+    """
+    whether to show the tokens ratio route to each expert in tensorboard log"""
+
     moe_shared_expert_intermediate_size: Optional[int] = None
     """Shared expert total ffn hidden size.
     It should be equal to 'num_shared_experts * ffn_size_of_each_shared_expert' if
@@ -595,6 +607,14 @@ class TransformerConfig(ModelParallelConfig):
     """[Compatibility alias for moe_router_padding_for_quantization]
     Enabling this will also enable moe_router_padding_for_quantization."""
 
+    moe_fp8_flow: Optional[bool] = False
+    """Whether to quantize activations to FP8 before DeepEP token dispatch to reduce
+    communication bandwidth and feed them directly into expert up-projection (GroupedMLP/GEMM)."""
+
+    moe_scaling_aware_transpose: Optional[bool] = False
+    """Whether to use scaling-aware FP8 transpose for MoE expert split instead of
+    naive dequantize-then-requantize. Only effective when moe_fp8_flow is enabled."""
+
     moe_router_num_groups: Optional[int] = None
     """Number of groups to divide experts into for group-limited routing.
     When using group-limited routing:
@@ -626,6 +646,10 @@ class TransformerConfig(ModelParallelConfig):
     moe_router_score_function: Literal['softmax', 'sigmoid'] = "softmax"
     """Score function for MoE routing. Can be "softmax" or "sigmoid"."""
 
+    # ZJ-021 0815: Enable renormalize per-token router probabilities and the selected top-k scores
+    moe_norm_topk_prob: bool = False
+    """Renormalizes per-token router probabilities and the selected top-k scores"""
+
     moe_router_dtype: Optional[Literal['fp32', 'fp64']] = None
     """Data type for routing and expert output weighted averaging. Using fp32 or fp64 can
     improve stability especially when the number of experts is large (e.g. finegrained-moe).
@@ -646,6 +670,12 @@ class TransformerConfig(ModelParallelConfig):
     """[Experimental] Force load balancing with random logits for MoE router, supports naive topk 
     and group-limited topk. This is an experimental feature and only for benchmark."""
 
+    moe_router_bias_mean_update_rate: float = 0.0
+    """The extra balancing term Moonshot introduced to the aux-loss-free load balancing bias update term '
+    in moonshotai/Moonlight-16B-A3B (https://arxiv.org/abs/2502.16982).
+    It adds an extra correction based on the average load offset,
+    in the Moonlight-16B-A3B model the value is equal to the bias update rate (1e-3)."""
+
     moe_grouped_gemm: bool = False
     """When there are multiple experts per rank, compress multiple local (potentially small) gemms
     in a single kernel launch to improve the utilization and performance by leveraging the Grouped
@@ -660,6 +690,10 @@ class TransformerConfig(ModelParallelConfig):
     """Scaling coefficient for the aux loss. A starting value of 1e-2 is recommended.
     If a list of load balancing types is provided for `moe_router_load_balancing_type`,
     a corresponding list of coefficients should be provided here."""
+
+    moe_device_balance_loss_coeff: float = 0 # Set as 0.05 in DeepSeek V2.
+    moe_communication_balance_loss_coeff: float = 0 # Set as 0.02 in DeepSeek V2.
+    """Scaling coefficient for the device and communication balancing loss."""
 
     moe_z_loss_coeff: Optional[float] = None  # 1e-3 would be a good start value for z-loss
     """Scaling coefficient for the z-loss. A starting value of 1e-3 is recommended."""
@@ -707,6 +741,20 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_permute_fusion: bool = False
     """Fuse token rearrangement ops during token dispatching."""
+
+    moe_warmup_router: int = -1
+    """Number of steps to apply router warmup randomness."""
+
+    # PathGuard Loss configuration
+    moe_pathguard_loss_coeff: float = 0.0
+    """Scaling coefficient for the PathGuard inter-layer routing collapse prevention loss."""
+    
+    moe_pathguard_k: int = 1
+    """Number of top conditional probabilities considered in PathGuard loss (k=1 replicates the original formulation)."""
+
+    moe_pathguard_loss_iter_threshold: int = 0
+    """If >0, the PathGuard loss remains disabled until current iteration exceeds this threshold."""
+
 
     moe_router_fusion: bool = False
     """Enable fusion for MoE TopK routing and aux-loss computation. This is only
@@ -882,6 +930,14 @@ class TransformerConfig(ModelParallelConfig):
     )
     """Transformer implementation to use.
     Options are 'transformer_engine' for Transformer Engine and 'local' for MCore."""
+
+
+    # MoE Chunk
+    moe_chunk_delay_wgrad_compute: bool = False
+    """Whether to use moe chunk."""
+
+    chunk_streams: Optional[List[torch.cuda.Stream]] = None
+    """When use moe chunk, creat dedicated stream."""
 
     #####################################
     # Fine-grained Activation Offloading
@@ -1088,7 +1144,7 @@ class TransformerConfig(ModelParallelConfig):
                     f"but got {self.moe_shared_expert_intermediate_size}"
                 )
             if self.moe_shared_expert_overlap and self.moe_token_dispatcher_type not in [
-                "alltoall"
+                "alltoall", "flex"
             ]:
                 raise ValueError(
                     f"moe_shared_expert_overlap only works with alltoall token dispatcher."
@@ -1196,12 +1252,15 @@ class TransformerConfig(ModelParallelConfig):
         if self.recompute_granularity == "selective":
             if len(self.recompute_modules) > 0:
                 allowed_modules = {
+                    "attn",
                     "core_attn",
                     "moe_act",
                     "layernorm",
                     "mla_up_proj",
                     "mlp",
                     "moe",
+                    "moe_router",
+                    "moe_expert",
                     "shared_experts",
                 }
                 invalid_modules = set(self.recompute_modules) - allowed_modules
@@ -1213,6 +1272,16 @@ class TransformerConfig(ModelParallelConfig):
             if "moe_act" in self.recompute_modules and not self.moe_grouped_gemm:
                 raise ValueError(
                     "moe_act in recompute_modules is only supported with moe_grouped_gemm."
+                )
+
+            if "moe" in self.recompute_modules and ("moe_router" in self.recompute_modules or "moe_expert" in self.recompute_modules):
+                raise ValueError(
+                    "moe in recompute_modules is not supported with moe_router or moe_expert in recompute_modules"
+                )
+
+            if "attn" in self.recompute_modules and ("core_attn" in self.recompute_modules or "mla_up_proj" in self.recompute_modules):
+                raise ValueError(
+                    "attn in recompute_modules is not supported with core_attn or mla_up_proj in recompute_modules"
                 )
 
             if "mla_up_proj" in self.recompute_modules and not self.multi_latent_attention:
@@ -1630,6 +1699,10 @@ class TransformerConfig(ModelParallelConfig):
                     "moe_router_padding_for_quantization."
                 )
 
+        if self.moe_fp8_flow:
+            if self.fp8 is None or (self.fp8 is not None and self.fp8_recipe != "blockwise"):
+                raise ValueError("moe_fp8_flow only support blockwise.")
+
         if (
             self.moe_router_topk == 1
             and self.moe_router_score_function == "softmax"
@@ -1983,6 +2056,9 @@ class TransformerConfig(ModelParallelConfig):
             assert not self.add_bias_linear
             assert not self.add_qkv_bias
             assert not self.use_kitchen
+
+        if self.moe_chunk_delay_wgrad_compute:
+            self.chunk_streams = [torch.cuda.Stream() for _ in range(3)]
 
         if self.experimental_attention_variant == "dsa":
             assert (

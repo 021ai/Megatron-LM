@@ -312,9 +312,10 @@ def _initialize_tp_communicators():
         )
 
 
-def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, store):
+def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, store, args=None):
     """Initialize torch.distributed and core model parallel."""
-    args = get_args()
+    if not args:
+        args = get_args()
 
     device_count = torch.cuda.device_count()
     if torch.distributed.is_initialized():
