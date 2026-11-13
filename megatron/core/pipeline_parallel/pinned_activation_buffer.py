@@ -7,6 +7,8 @@ import logging
 import math
 import time
 import weakref
+import threading
+from dataclasses import dataclass, field
 
 import torch
 
@@ -203,3 +205,280 @@ class PinnedActivationBuffer:
                 if torch.cuda.is_current_stream_capturing():
                     self._captured_events.append(event)
             self._reader_streams.clear()
+
+
+@dataclass
+class _EventSafeBlock:
+    """A byte range managed by the event-safe eager allocator."""
+
+    start: int
+    size: int
+    logical_bytes: int = 0
+    tensor_id: int | None = None
+    events: list = field(default_factory=list)
+    graph_owned: bool = False
+
+    @property
+    def end(self) -> int:
+        return self.start + self.size
+
+
+class _EventSafePinnedActivationBuffer:
+    """Pinned arena with best-fit reuse and a separate graph capture arena."""
+
+    ALIGNMENT = 256
+
+    def __init__(self, capacity_bytes: int) -> None:
+        if capacity_bytes < self.ALIGNMENT or capacity_bytes % self.ALIGNMENT:
+            raise ValueError(
+                "Pinned activation buffer capacity must be a positive multiple of 256 bytes"
+            )
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("Create the pinned activation buffer before CUDA graph capture")
+        self.capacity_bytes = capacity_bytes
+        self.peak_live_bytes = 0
+        self.live_bytes = 0
+        self._storage = self._allocate_storage(capacity_bytes)
+        self._state_lock = threading.RLock()
+        self._typed_storage: dict[torch.dtype, torch.Tensor] = {}
+        self._free_blocks = [_EventSafeBlock(0, capacity_bytes)]
+        self._allocations: dict[int, _EventSafeBlock] = {}
+        self._stats = {
+            "allocation_requests": 0,
+            "release_requests": 0,
+            "eager_reuses": 0,
+            "graph_allocations": 0,
+            "split_operations": 0,
+            "coalesce_operations": 0,
+            "event_waits": 0,
+        }
+        self._high_watermark = 0
+        self._offset = 0
+        self.graph_reserved_bytes = 0
+        self._capture_id: int | None = None
+        self._capture_start = 0
+        self._capture_offset = 0
+        self._captured_events: list[torch.cuda.Event] = []
+
+    def _allocate_storage(self, capacity_bytes: int) -> torch.Tensor:
+        cuda_runtime = _cuda_runtime()
+        started = time.perf_counter()
+        error, address = cuda_runtime.cudaHostAlloc(
+            capacity_bytes, cuda_runtime.cudaHostAllocDefault
+        )
+        if error != cuda_runtime.cudaError_t.cudaSuccess:
+            raise RuntimeError(
+                f"cudaHostAlloc of {capacity_bytes} bytes for the pinned activation buffer failed: "
+                f"{error}"
+            )
+        memory = (ctypes.c_uint8 * capacity_bytes).from_address(address)
+        self._free = weakref.finalize(memory, _free_host, address, torch.cuda.current_device())
+        self._free.atexit = False
+        log_single_rank(
+            logger,
+            logging.INFO,
+            f"Pinned {capacity_bytes / 2**30:.2f} GiB for the activation offload buffer in "
+            f"{time.perf_counter() - started:.1f} s",
+        )
+        return torch.frombuffer(memory, dtype=torch.uint8)
+
+    def _align(self, nbytes: int) -> int:
+        return ((nbytes + self.ALIGNMENT - 1) & -self.ALIGNMENT) or self.ALIGNMENT
+
+    def _view(self, start: int, shape: tuple, dtype: torch.dtype) -> torch.Tensor:
+        itemsize = dtype.itemsize
+        typed_storage = self._typed_storage.get(dtype)
+        if typed_storage is None:
+            typed_storage = self._storage.view(dtype)
+            self._typed_storage[dtype] = typed_storage
+        strides = [1] * len(shape)
+        for axis in range(len(shape) - 2, -1, -1):
+            strides[axis] = strides[axis + 1] * max(shape[axis + 1], 1)
+        return typed_storage.as_strided(shape, strides, start // itemsize)
+
+    def _reclaim_completed_events(self) -> None:
+        for block in self._free_blocks:
+            if block.events:
+                block.events = [event for event in block.events if not event.query()]
+
+    def _insert_free(self, block: _EventSafeBlock) -> None:
+        blocks = self._free_blocks + [block]
+        blocks.sort(key=lambda item: item.start)
+        merged = []
+        for current in blocks:
+            if merged and merged[-1].end == current.start:
+                previous = merged[-1]
+                previous.size += current.size
+                previous.events.extend(current.events)
+                self._stats["coalesce_operations"] += 1
+            else:
+                merged.append(current)
+        self._free_blocks = merged
+
+    def _reserve_graph_prefix(self, end: int) -> None:
+        if end <= self.graph_reserved_bytes:
+            return
+        self.graph_reserved_bytes = end
+        retained = []
+        for block in self._free_blocks:
+            if block.end <= end:
+                continue
+            if block.start < end:
+                block = _EventSafeBlock(end, block.end - end, events=list(block.events))
+            retained.append(block)
+        self._free_blocks = retained
+
+    def _find_best_fit(self, required: int):
+        candidates = [block for block in self._free_blocks if block.size >= required]
+        return min(candidates, key=lambda block: (block.size, block.start), default=None)
+
+    def _capacity_error(self, required: int, capturing: bool) -> RuntimeError:
+        self._reclaim_completed_events()
+        free_bytes = sum(block.size for block in self._free_blocks)
+        largest = max((block.size for block in self._free_blocks), default=0)
+        retired = sum(block.size for block in self._free_blocks if block.events)
+        pending = sum(len(block.events) for block in self._free_blocks)
+        return RuntimeError(
+            "Pinned activation buffer budget exceeded: "
+            f"request={required} bytes, capacity={self.capacity_bytes} bytes, "
+            f"live={self.live_bytes} bytes, graph_reserved={self.graph_reserved_bytes} bytes, "
+            f"free={free_bytes} bytes, largest_free_block={largest} bytes, "
+            f"retired={retired} bytes, pending_events={pending}, "
+            f"high_watermark={self._high_watermark} bytes, "
+            f"unused_tail={max(0, self.capacity_bytes - self._high_watermark)} bytes, "
+            f"capture={capturing}. Increase fine_grained_offloading_buffer_size_gib, "
+            "reduce offloaded activations, or reduce the number of outstanding microbatches."
+        )
+
+    def _allocate_eager(self, shape, dtype, nbytes, aligned, stream):
+        self._reclaim_completed_events()
+        block = self._find_best_fit(aligned)
+        if block is None:
+            raise self._capacity_error(aligned, capturing=False)
+        self._free_blocks.remove(block)
+        for event in block.events:
+            stream.wait_event(event)
+            self._stats["event_waits"] += 1
+        if block.size > aligned:
+            self._stats["split_operations"] += 1
+            self._insert_free(
+                _EventSafeBlock(block.start + aligned, block.size - aligned, events=list(block.events))
+            )
+        block.size = aligned
+        block.logical_bytes = nbytes
+        block.tensor_id = None
+        block.events = []
+        block.graph_owned = False
+        tensor = self._view(block.start, shape, dtype)
+        block.tensor_id = id(tensor)
+        self._allocations[id(tensor)] = block
+        self._high_watermark = max(self._high_watermark, block.end)
+        self._offset = self._high_watermark
+        return tensor
+
+    def _capture_info(self, stream) -> None:
+        cuda_runtime = _cuda_runtime()
+        error, _, capture_id, *_ = cuda_runtime.cudaStreamGetCaptureInfo(stream.cuda_stream)
+        if error != cuda_runtime.cudaError_t.cudaSuccess:
+            raise RuntimeError(f"Cannot identify pinned buffer capture: {error}")
+        if capture_id != self._capture_id:
+            self._capture_id = capture_id
+            self._capture_start = max(
+                self.graph_reserved_bytes,
+                self._high_watermark if self._allocations else self.graph_reserved_bytes,
+            )
+            self._capture_offset = self._capture_start
+            # A graph capture may start in a retired eager block. Preserve the
+            # same dependency that eager reuse uses before the graph writes it.
+            for block in self._free_blocks:
+                if block.end > self._capture_start:
+                    for event in block.events:
+                        stream.wait_event(event)
+                        self._captured_events.append(event)
+
+    def allocate(self, shape: tuple, dtype: torch.dtype, *, stream=None) -> torch.Tensor:
+        with self._state_lock:
+            return self._allocate_impl(shape, dtype, stream=stream)
+
+    def _allocate_impl(self, shape: tuple, dtype: torch.dtype, *, stream=None) -> torch.Tensor:
+        self._stats["allocation_requests"] += 1
+        if stream is None:
+            stream = torch.cuda.current_stream(torch.cuda.current_device())
+        capturing = torch.cuda.is_current_stream_capturing()
+        nbytes = math.prod(shape) * dtype.itemsize
+        aligned = self._align(nbytes)
+        if capturing:
+            self._capture_info(stream)
+            if self.capacity_bytes - self._capture_offset < aligned:
+                raise self._capacity_error(aligned, capturing=True)
+            start = self._capture_offset
+            self._capture_offset += aligned
+            self._high_watermark = max(self._high_watermark, self._capture_offset)
+            self._offset = self._high_watermark
+            self._reserve_graph_prefix(self._capture_offset)
+            tensor = self._view(start, shape, dtype)
+            self._allocations[id(tensor)] = _EventSafeBlock(
+                start, aligned, nbytes, id(tensor), graph_owned=True
+            )
+            self._stats["graph_allocations"] += 1
+        else:
+            tensor = self._allocate_eager(shape, dtype, nbytes, aligned, stream)
+            self._stats["eager_reuses"] += 1
+        self.live_bytes += nbytes
+        self.peak_live_bytes = max(self.peak_live_bytes, self.live_bytes)
+        return tensor
+
+    def release(self, tensor: torch.Tensor, *, stream=None) -> None:
+        with self._state_lock:
+            self._release_impl(tensor, stream=stream)
+
+    def _release_impl(self, tensor: torch.Tensor, *, stream=None) -> None:
+        self._stats["release_requests"] += 1
+        block = self._allocations.pop(id(tensor), None)
+        if block is None:
+            raise ValueError("Attempting to release a tensor not allocated by this buffer")
+        self.live_bytes -= block.logical_bytes
+        if torch.cuda.is_current_stream_capturing():
+            # Captured replay does not execute Python release bookkeeping.
+            self._reserve_graph_prefix(max(self.graph_reserved_bytes, block.end))
+            return
+        if stream is None:
+            stream = torch.cuda.current_stream(torch.cuda.current_device())
+        try:
+            event = torch.cuda.Event(external=True)
+        except TypeError:
+            event = torch.cuda.Event()
+        event.record(stream)
+        block.tensor_id = None
+        block.logical_bytes = 0
+        block.events = [event]
+        self._insert_free(block)
+
+    def get_diagnostics(self) -> dict:
+        with self._state_lock:
+            return self._get_diagnostics_impl()
+
+    def _get_diagnostics_impl(self) -> dict:
+        """Return allocator diagnostics without synchronizing CUDA streams."""
+        self._reclaim_completed_events()
+        free_bytes = sum(block.size for block in self._free_blocks)
+        largest = max((block.size for block in self._free_blocks), default=0)
+        retired = sum(block.size for block in self._free_blocks if block.events)
+        return {
+            "stats": dict(self._stats),
+            "capacity_bytes": self.capacity_bytes,
+            "live_bytes": self.live_bytes,
+            "peak_live_bytes": self.peak_live_bytes,
+            "graph_reserved_bytes": self.graph_reserved_bytes,
+            "free_bytes": free_bytes,
+            "largest_free_block_bytes": largest,
+            "retired_bytes": retired,
+            "pending_event_count": sum(len(block.events) for block in self._free_blocks),
+            "free_block_count": len(self._free_blocks),
+            "allocation_count": len(self._allocations),
+            "high_watermark_bytes": self._high_watermark,
+            "unused_tail_bytes": max(0, self.capacity_bytes - self._high_watermark),
+        }
+        
+
+PinnedActivationBuffer = _EventSafePinnedActivationBuffer
